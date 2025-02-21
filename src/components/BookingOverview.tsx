@@ -1,7 +1,8 @@
 import React from 'react';
 import { APIBooking } from '../types';
-import { Calendar, DollarSign, User, Clock, ChevronUp, ChevronDown } from 'lucide-react';
-import { getBookings, updateBooking } from '../services/api';
+import { Calendar, DollarSign, User, Clock, ChevronUp, ChevronDown, Wand2 } from 'lucide-react';
+import { getBookings, updateBooking, getRooms, assignRoom } from '../services/api';
+import { API_CONFIG } from '../config';
 
 interface BookingOverviewProps {
   bookings: APIBooking[];
@@ -30,25 +31,50 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
     averageDailyRate: 0,
     averageBookingValue: 0
   });
+  const [isAutoAssigning, setIsAutoAssigning] = React.useState(false);
 
   const fetchBookings = React.useCallback(async () => {
     setIsLoading(true);
     try {
+      console.log('Fetching bookings:', {
+        page: currentPage,
+        limit: 50,
+        status,
+        search: searchTerm,
+        sort: { field: sortField, direction: sortDirection }
+      });
+
       const response = await getBookings({
         page: currentPage,
         limit: 50,
         status: status,
         search: searchTerm,
         sort_by: sortField,
-        sort_order: sortDirection
+        sort_order: sortDirection,
+        hotel_id: API_CONFIG.HOTEL_ID
+      });
+
+      console.log('Bookings response:', {
+        data: response.data?.length,
+        pagination: response.pagination,
+        raw: response
       });
       
-      if ('data' in response) {
+      if (response && response.data) {
         setBookings(response.data);
-        setTotalPages(Math.ceil(response.pagination?.total || 0 / 50));
+        setTotalPages(response.pagination.total_pages || 1);
+        console.log('Updated bookings state:', {
+          bookings: response.data.length,
+          totalPages: response.pagination.total_pages
+        });
+      } else {
+        console.error('Invalid response format:', response);
       }
+
     } catch (error) {
       console.error('Error fetching bookings:', error);
+      setBookings([]);
+      setTotalPages(1);
     } finally {
       setIsLoading(false);
     }
@@ -56,34 +82,63 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
 
   const fetchTotalStats = React.useCallback(async () => {
     try {
+      // Get all bookings for stats
       const response = await getBookings({
-        limit: 3500, // Set higher to get all bookings
+        limit: 3500,
         status: status,
         search: searchTerm,
-        sort_by: sortField,
-        sort_order: sortDirection
+        hotel_id: API_CONFIG.HOTEL_ID
       });
       
-      if ('data' in response) {
-        const allBookings = response.data;
-        const totalRevenue = allBookings.reduce((sum: number, b: APIBooking) => sum + parseFloat(b.total_amount || '0'), 0);
-        const totalDays = allBookings.reduce((sum: number, b: APIBooking) => {
-          const days = (new Date(b.check_out_date).getTime() - new Date(b.check_in_date).getTime()) / (1000 * 60 * 60 * 24);
-          return sum + days;
-        }, 0);
+      console.log('Total stats response:', {
+        data: response.data?.length,
+        pagination: response.pagination
+      });
 
-        setTotalStats({
-          totalBookings: allBookings.length,
-          totalRevenue: totalRevenue,
-          averageStay: Math.round(totalDays / allBookings.length),
-          averageDailyRate: totalRevenue / totalDays,
-          averageBookingValue: totalRevenue / allBookings.length
-        });
-      }
+      const allBookings = response.data || [];
+      const activeBookings = allBookings.filter((b: APIBooking) => b.status !== 'cancelled');
+      
+      // Calculate total revenue
+      const totalRevenue = activeBookings.reduce((sum: number, b: APIBooking) => {
+        const amount = parseFloat(b.total_amount || '0');
+        return sum + (isNaN(amount) ? 0 : amount);
+      }, 0);
+
+      // Calculate total days
+      const totalDays = activeBookings.reduce((sum: number, b: APIBooking) => {
+        const checkIn = new Date(b.check_in_date);
+        const checkOut = new Date(b.check_out_date);
+        const days = Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24));
+        return sum + Math.max(0, days);
+      }, 0);
+
+      console.log('Stats calculation:', {
+        activeBookings: activeBookings.length,
+        totalRevenue,
+        totalDays,
+        averageStay: totalDays / activeBookings.length || 0,
+        averageDaily: totalRevenue / totalDays || 0,
+        averageBooking: totalRevenue / activeBookings.length || 0
+      });
+
+      setTotalStats({
+        totalBookings: activeBookings.length,
+        totalRevenue: totalRevenue,
+        averageStay: Math.round(totalDays / activeBookings.length) || 0,
+        averageDailyRate: totalDays > 0 ? totalRevenue / totalDays : 0,
+        averageBookingValue: activeBookings.length > 0 ? totalRevenue / activeBookings.length : 0
+      });
     } catch (error) {
       console.error('Error fetching total stats:', error);
+      setTotalStats({
+        totalBookings: 0,
+        totalRevenue: 0,
+        averageStay: 0,
+        averageDailyRate: 0,
+        averageBookingValue: 0
+      });
     }
-  }, [status, searchTerm, sortField, sortDirection]);
+  }, [status, searchTerm]);
 
   React.useEffect(() => {
     fetchBookings();
@@ -141,12 +196,120 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
     }
   };
 
+  const handleAutoAssignAll = async () => {
+    if (isAutoAssigning) return;
+    setIsAutoAssigning(true);
+
+    try {
+      // Get all rooms first
+      const rooms = await getRooms({
+        hotel_id: API_CONFIG.HOTEL_ID
+      });
+
+      // Get all unassigned bookings
+      const response = await getBookings({
+        limit: 3500,
+        assigned: false
+      });
+
+      if (!('data' in response)) return;
+      const unassignedBookings = response.data;
+
+      console.log('Starting auto-assign process:', {
+        totalRooms: rooms.length,
+        unassignedBookings: unassignedBookings.length
+      });
+
+      // Group rooms by type
+      const roomsByType = rooms.reduce((acc, room) => {
+        const type = room.room_type_name || '';
+        if (!acc[type]) acc[type] = [];
+        acc[type].push(room);
+        return acc;
+      }, {} as Record<string, typeof rooms>);
+
+      let assignedCount = 0;
+      let errorCount = 0;
+
+      // Process each unassigned booking
+      for (const booking of unassignedBookings) {
+        try {
+          // Find matching room type
+          let matchingRooms: typeof rooms = [];
+          
+          if (booking.room_type_name?.includes('Three Bedroom')) {
+            matchingRooms = roomsByType['Three Bedroom Apartments'] || [];
+          } else if (booking.room_type_name?.includes('Two Bedroom')) {
+            matchingRooms = roomsByType['Two Bedroom Apartments'] || [];
+          }
+
+          if (matchingRooms.length === 0) {
+            console.log(`No matching rooms found for booking ${booking.id} (${booking.room_type_name})`);
+            continue;
+          }
+
+          // Find first available room
+          const availableRoom = matchingRooms.find(room => room.status === 'available');
+          if (!availableRoom) {
+            console.log(`No available rooms for booking ${booking.id} (${booking.room_type_name})`);
+            continue;
+          }
+
+          // Assign room
+          await assignRoom(booking.id, availableRoom.room_number);
+          assignedCount++;
+          console.log(`Assigned booking ${booking.id} to room ${availableRoom.room_number}`);
+        } catch (error) {
+          console.error(`Error assigning booking ${booking.id}:`, error);
+          errorCount++;
+        }
+      }
+
+      console.log('Auto-assign completed:', {
+        processed: unassignedBookings.length,
+        assigned: assignedCount,
+        errors: errorCount
+      });
+
+      // Refresh the bookings list and stats
+      await fetchBookings();
+      await fetchTotalStats();
+
+    } catch (error) {
+      console.error('Error in auto-assign process:', error);
+    } finally {
+      setIsAutoAssigning(false);
+    }
+  };
+
+  const handlePrevPage = () => {
+    setCurrentPage(prev => Math.max(1, prev - 1));
+  };
+
+  const handleNextPage = () => {
+    setCurrentPage(prev => Math.min(totalPages, prev + 1));
+  };
+
+  const getPaginationInfo = () => {
+    const start = (currentPage - 1) * 50 + 1;
+    const end = Math.min(currentPage * 50, totalStats.totalBookings);
+    return `${start}-${end} of ${totalStats.totalBookings}`;
+  };
+
   return (
     <div className="bg-white rounded-lg shadow">
       <div className="p-6 border-b">
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-2xl font-semibold">Booking Overview</h2>
           <div className="flex gap-4">
+            <button
+              onClick={handleAutoAssignAll}
+              disabled={isAutoAssigning}
+              className="flex items-center gap-2 px-4 py-2 bg-[#2596be] text-white rounded-lg hover:bg-[#2596be]/90 disabled:opacity-50"
+            >
+              <Wand2 className="w-4 h-4" />
+              {isAutoAssigning ? 'Auto-assigning...' : 'Auto-assign Rooms'}
+            </button>
             <select
               className="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2596be]"
               onChange={(e) => {
@@ -280,21 +443,28 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
               </tbody>
             </table>
             <div className="flex justify-between items-center p-4 border-t">
-              <button
-                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                disabled={currentPage === 1}
-                className="px-4 py-2 border rounded-lg disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span>Page {currentPage} of {totalPages}</span>
-              <button
-                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                disabled={currentPage === totalPages}
-                className="px-4 py-2 border rounded-lg disabled:opacity-50"
-              >
-                Next
-              </button>
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={handlePrevPage}
+                  disabled={currentPage === 1 || isLoading}
+                  className="px-4 py-2 border rounded-lg disabled:opacity-50 hover:bg-gray-50"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-gray-600">
+                  {getPaginationInfo()}
+                </span>
+                <button
+                  onClick={handleNextPage}
+                  disabled={currentPage === totalPages || isLoading}
+                  className="px-4 py-2 border rounded-lg disabled:opacity-50 hover:bg-gray-50"
+                >
+                  Next
+                </button>
+              </div>
+              <div className="text-sm text-gray-600">
+                Page {currentPage} of {totalPages}
+              </div>
             </div>
             {isModalOpen && selectedBooking && (
               <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">

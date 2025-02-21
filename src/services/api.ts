@@ -11,24 +11,51 @@ const api = axios.create({
   params: {
     auth_key: API_CONFIG.API_KEY
   },
-  // Add timeout and retry configuration
-  timeout: 10000,
-  // Add CORS headers
-  withCredentials: false
+  timeout: 30000,
+  withCredentials: true  // Enable credentials
 });
 
-// Initialize auth token
-const initAuth = async () => {
+// Add delay between requests
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Initialize auth token with retry
+const initAuth = async (retryCount = 0) => {
   try {
     const token = localStorage.getItem('token');
     if (!token) {
-      const response = await login('endre@hotelonline.co', 'S@ccess900');
-      api.defaults.headers.common['Authorization'] = `Bearer ${response}`;
+      // Add delay before request
+      await delay(1000 * (retryCount + 1));
+      
+      const response = await axios.post('/auth/login', 
+        { 
+          email: 'endre@hotelonline.co', 
+          password: 'S@ccess900', 
+          auth_key: API_CONFIG.API_KEY 
+        },
+        {
+          headers: { 
+            'Content-Type': 'application/json'
+          },
+          withCredentials: true
+        }
+      );
+      const { token: newToken } = response.data;
+      localStorage.setItem('token', newToken);
+      api.defaults.headers.common['Authorization'] = `Bearer ${newToken}`;
     } else {
       api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error('Auth initialization failed:', error);
+    
+    // Handle rate limiting
+    if (error.response?.status === 429 && retryCount < 3) {
+      console.log(`Rate limited, retrying in ${(retryCount + 1)} seconds...`);
+      await delay(1000 * (retryCount + 1));
+      return initAuth(retryCount + 1);
+    }
+    
+    localStorage.removeItem('token');
     throw error;
   }
 };
@@ -42,26 +69,24 @@ console.log('[API] Using base URL:', API_CONFIG.BASE_URL);
 // Add request interceptor to handle auth
 api.interceptors.request.use(
   async (config) => {
-    // Ensure we have a token before making requests
-    if (!api.defaults.headers.common['Authorization']) {
-      await initAuth();
+    try {
+      // Ensure we have a token before making requests
+      if (!api.defaults.headers.common['Authorization']) {
+        await initAuth();
+      }
+      
+      // Add required params
+      config.params = {
+        ...config.params,
+        auth_key: API_CONFIG.API_KEY,
+        hotel_id: API_CONFIG.HOTEL_ID
+      };
+      
+      return config;
+    } catch (error) {
+      console.error('Request interceptor error:', error);
+      return Promise.reject(error);
     }
-    
-    // Add required params
-    config.params = {
-      ...config.params,
-      auth_key: API_CONFIG.API_KEY,
-      hotel_id: API_CONFIG.HOTEL_ID
-    };
-    
-    console.log('🚀 API Request:', { 
-      fullUrl: `${config.baseURL}${config.url}`,
-      method: config.method,
-      headers: config.headers,
-      params: config.params,
-      data: config.data
-    });
-    return config;
   },
   (error) => {
     console.error('❌ API Request Error:', error);
@@ -81,18 +106,17 @@ api.interceptors.response.use(
     return response;
   },
   async (error) => {
-    console.error('API Response Error Details:', {
-      url: `${error.config?.baseURL}${error.config?.url}`,
-      status: error.response?.status,
-      message: error.message,
-      data: error.response?.data,
-      headers: error.config?.headers
-    });
+    if (error.response?.status === 429) {
+      const retryAfter = error.response.headers['retry-after'] || 1;
+      console.log(`Rate limited, retrying after ${retryAfter} seconds...`);
+      await delay(retryAfter * 1000);
+      return axios(error.config);
+    }
 
     if (error.response?.status === 401) {
       console.log('Unauthorized, attempting login...');
       try {
-        await login('endre@hotelonline.co', 'S@ccess900');
+        await initAuth();
         const config = error.config;
         config.headers.Authorization = `Bearer ${localStorage.getItem('token')}`;
         return axios(config);
@@ -110,7 +134,13 @@ export const login = async (email: string, password: string) => {
     console.log('Attempting login...');
     const response = await axios.post('http://37.27.142.148:3000/auth/login', 
       { email, password, auth_key: API_CONFIG.API_KEY },
-      { headers: { 'Content-Type': 'application/json' } }
+      { 
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        withCredentials: true
+      }
     );
     console.log('Login successful:', response.data);
     const { token } = response.data;

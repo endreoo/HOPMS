@@ -27,29 +27,52 @@ export default defineConfig({
         target: 'http://37.27.142.148:3000',
         changeOrigin: true,
         secure: false,
-        rewrite: (path) => path.replace(/^\/api/, '')
+        rewrite: (path) => path.replace(/^\/api/, ''),
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            proxyReq.setHeader('Origin', 'http://37.27.142.148:5169');
+          });
+        }
       },
       '/auth': {
         target: 'http://37.27.142.148:3000',
         changeOrigin: true,
-        secure: false
+        secure: false,
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            proxyReq.setHeader('Origin', 'http://37.27.142.148:5169');
+          });
+        }
       }
     }
   },
   server: {
     port: 5169,
     host: true,
+    cors: {
+      origin: true,
+      credentials: true
+    },
     proxy: {
       '/api': {
         target: 'http://37.27.142.148:3000',
         changeOrigin: true,
         secure: false,
-        rewrite: (path) => path.replace(/^\/api/, '')
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            proxyReq.setHeader('Origin', 'http://37.27.142.148:5169');
+          });
+        }
       },
       '/auth': {
         target: 'http://37.27.142.148:3000',
         changeOrigin: true,
-        secure: false
+        secure: false,
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            proxyReq.setHeader('Origin', 'http://37.27.142.148:5169');
+          });
+        }
       }
     }
   },

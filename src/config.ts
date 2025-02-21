@@ -1,5 +1,5 @@
 export const API_CONFIG = {
-  BASE_URL: 'http://37.27.142.148:3000',
+  BASE_URL: '',  // Empty base URL to use proxy
   API_KEY: 'c6c17b4a2d7b409f9a3e3ea830a48c28',
   HOTEL_ID: '40642'
 };

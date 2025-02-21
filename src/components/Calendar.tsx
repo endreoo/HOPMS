@@ -60,6 +60,16 @@ export function Calendar({
   const [collapsedTypes, setCollapsedTypes] = React.useState<Record<number, boolean>>({});
   const [isAssigning, setIsAssigning] = React.useState(false);
 
+  // Generate array of dates based on viewType
+  const dates = React.useMemo(() => {
+    const dateArray = [];
+    const numDays = parseInt(viewType || '7');
+    for (let i = 0; i < numDays; i++) {
+      dateArray.push(addDays(currentMonth || new Date(), i));
+    }
+    return dateArray;
+  }, [currentMonth, viewType]);
+
   // Update the normalizedBookings memo with more robust handling
   const normalizedBookings = React.useMemo(() => {
     let processedBookings: APIBooking[] = [];
@@ -78,19 +88,28 @@ export function Calendar({
     processedBookings = processedBookings.filter(booking => 
       booking.status !== 'cancelled' && 
       booking.check_in_date && 
-      booking.check_out_date
+      booking.check_out_date &&
+      booking.room_number // Only show assigned bookings
     ).map(booking => ({
       ...booking,
       check_in_date: new Date(booking.check_in_date).toISOString(),
       check_out_date: new Date(booking.check_out_date).toISOString()
     }));
 
-    console.log('Processed bookings:', processedBookings);
+    console.log('Calendar bookings:', {
+      total: processedBookings.length,
+      sample: processedBookings[0],
+      dateRange: {
+        start: dates[0]?.toISOString(),
+        end: dates[dates.length - 1]?.toISOString()
+      }
+    });
+
     return {
       bookings: processedBookings,
       total: processedBookings.length
     };
-  }, [bookings]);
+  }, [bookings, dates]);
 
   // Ensure safeBookings is always an array
   const safeBookings = React.useMemo(() => {
@@ -118,16 +137,6 @@ export function Calendar({
       }
     });
   }, [bookings, normalizedBookings, safeBookings]);
-
-  // Generate array of dates based on viewType
-  const dates = React.useMemo(() => {
-    const dateArray = [];
-    const numDays = parseInt(viewType || '7');
-    for (let i = 0; i < numDays; i++) {
-      dateArray.push(addDays(currentMonth || new Date(), i));
-    }
-    return dateArray;
-  }, [currentMonth, viewType]);
 
   // Group rooms by room type
   const roomsByType = React.useMemo(() => {
