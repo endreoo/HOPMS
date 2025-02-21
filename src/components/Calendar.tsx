@@ -84,24 +84,51 @@ export function Calendar({
       }
     }
 
-    // Filter out cancelled bookings and ensure dates are properly formatted
-    processedBookings = processedBookings.filter(booking => 
-      booking.status !== 'cancelled' && 
-      booking.check_in_date && 
-      booking.check_out_date &&
-      booking.room_number // Only show assigned bookings
-    ).map(booking => ({
+    // Get view start and end dates
+    const viewStart = startOfDay(dates[0]);
+    const viewEnd = startOfDay(dates[dates.length - 1]);
+
+    console.log('Calendar view dates:', {
+      viewStart: viewStart.toISOString(),
+      viewEnd: viewEnd.toISOString(),
+      totalBookings: processedBookings.length
+    });
+
+    // Filter bookings that overlap with the current view
+    processedBookings = processedBookings.filter(booking => {
+      // Basic validation
+      if (!booking.check_in_date || !booking.check_out_date || booking.status === 'cancelled') {
+        return false;
+      }
+
+      // Convert dates
+      const bookingStart = startOfDay(new Date(booking.check_in_date));
+      const bookingEnd = startOfDay(new Date(booking.check_out_date));
+
+      // Check if booking overlaps with view period
+      const overlapsView = bookingStart <= viewEnd && bookingEnd >= viewStart;
+
+      if (!overlapsView) {
+        console.log('Booking outside view:', {
+          id: booking.id,
+          checkIn: bookingStart.toISOString(),
+          checkOut: bookingEnd.toISOString()
+        });
+      }
+
+      return overlapsView;
+    }).map(booking => ({
       ...booking,
       check_in_date: new Date(booking.check_in_date).toISOString(),
       check_out_date: new Date(booking.check_out_date).toISOString()
     }));
 
-    console.log('Calendar bookings:', {
+    console.log('Filtered bookings:', {
       total: processedBookings.length,
       sample: processedBookings[0],
       dateRange: {
-        start: dates[0]?.toISOString(),
-        end: dates[dates.length - 1]?.toISOString()
+        start: viewStart.toISOString(),
+        end: viewEnd.toISOString()
       }
     });
 
@@ -198,33 +225,22 @@ export function Calendar({
     }, {} as Record<number, APIBooking[]>);
   }, [safeBookings]);
 
-  // Update getRoomBookings with more robust handling
-  const getRoomBookings = React.useCallback((roomNumber: string, date: Date) => {
-    if (!roomNumber || !date || !Array.isArray(safeBookings)) {
+  // Update getRoomBookings to return unique bookings instead of per-day bookings
+  const getRoomBookings = React.useCallback((roomNumber: string) => {
+    if (!roomNumber || !Array.isArray(safeBookings)) {
       return [];
     }
 
-    const currentDate = startOfDay(date);
     return safeBookings.filter(booking => {
       if (!booking || typeof booking !== 'object') return false;
 
-      // Get room number from booking
-      const bookingRoomNumber = booking.room_number;
-      if (!bookingRoomNumber) return false;
+      // Get room number from all possible fields
+      const bookingRoomNumber = booking.room_number || 
+                               (booking.room && booking.room.room_number) ||
+                               (booking.room_details && booking.room_details.room_number) ||
+                               (booking.raw_data?.bookingDetail?.BookingTran?.[0]?.RoomName);
 
-      try {
-        const checkIn = startOfDay(new Date(booking.check_in_date));
-        const checkOut = startOfDay(new Date(booking.check_out_date));
-        
-        return (
-          bookingRoomNumber === roomNumber &&
-          currentDate >= checkIn &&
-          currentDate < checkOut
-        );
-      } catch (error) {
-        console.error('Error processing booking dates:', error);
-        return false;
-      }
+      return bookingRoomNumber === roomNumber;
     });
   }, [safeBookings]);
 
@@ -287,52 +303,94 @@ export function Calendar({
   };
 
   const getBookingStyle = (booking: APIBooking) => {
-    const startDate = dates[0];
-    const endDate = dates[dates.length - 1];
     const bookingStart = new Date(booking.check_in_date);
     const bookingEnd = new Date(booking.check_out_date);
+    const viewStart = dates[0];
+    const viewEnd = dates[dates.length - 1];
     
-    // Calculate the day index for start and end
-    let startIndex = Math.max(0, dates.findIndex(day => 
-      day.toDateString() === bookingStart.toDateString()
+    // Find the visible start and end dates within the current view
+    const visibleStart = Math.max(0, dates.findIndex(day => 
+      startOfDay(day).getTime() === startOfDay(bookingStart).getTime()
     ));
     
-    let endIndex = dates.findIndex(day => 
-      day.toDateString() === bookingEnd.toDateString()
+    const visibleEnd = dates.findIndex(day => 
+      startOfDay(day).getTime() === startOfDay(bookingEnd).getTime()
     );
-    
-    if (endIndex === -1) endIndex = dates.length - 1;
     
     // Calculate position and width
     const cellWidth = 100 / dates.length;
-    const left = startIndex * cellWidth;
-    const width = (endIndex - startIndex + 1) * cellWidth;
+    
+    // Check if booking extends beyond view boundaries
+    const startsBeforeView = startOfDay(bookingStart).getTime() < startOfDay(viewStart).getTime();
+    const endsAfterView = startOfDay(bookingEnd).getTime() > startOfDay(viewEnd).getTime();
+    
+    // Calculate left position
+    const left = startsBeforeView ? 0 : (visibleStart * cellWidth) + (cellWidth / 2);
+    
+    // Calculate width based on visibility
+    let width;
+    if (startsBeforeView && endsAfterView) {
+      // Booking spans entire view
+      width = 100;
+    } else if (startsBeforeView) {
+      // Booking starts before view and ends within view
+      width = ((visibleEnd + 0.5) * cellWidth);
+    } else if (endsAfterView) {
+      // Booking starts within view and ends after view
+      width = (100 - left);
+    } else {
+      // Booking starts and ends within view
+      width = ((visibleEnd === -1 ? dates.length - 0.5 : visibleEnd + 0.5) - (visibleStart + 0.5)) * cellWidth;
+    }
 
-    const isFirstDay = startIndex === Math.max(0, dates.findIndex(day => 
-      day.toDateString() === bookingStart.toDateString()
-    ));
-    const isLastDay = endIndex === dates.findIndex(day => 
-      day.toDateString() === bookingEnd.toDateString()
-    );
+    // Determine booking status color
+    const now = new Date();
+    const checkIn = new Date(booking.check_in_date);
+    const checkOut = new Date(booking.check_out_date);
+    
+    let baseColor;
+    if (now < checkIn) {
+      // Future booking (confirmed but not checked in)
+      baseColor = '#2596be';
+    } else if (now >= checkIn && now < checkOut) {
+      // Active booking (checked in)
+      baseColor = '#16a34a';
+    } else {
+      // Past booking (checked out)
+      baseColor = '#6b7280';
+    }
 
-    // Create a polygon that starts from the middle of the left side if it's the first day
-    // and/or ends at the middle of the right side if it's the last day
-    const polygonPoints = [
-      isFirstDay ? '50% 0,' : '0 0,',
-      '100% 0,',
-      isLastDay ? '50% 100%,' : '100% 100%,',
-      isFirstDay ? '50% 100%' : '0 100%'
-    ].join(' ');
+    // Create gradient effect
+    const gradient = `linear-gradient(90deg, 
+      ${baseColor}99 0%, 
+      ${baseColor} 40%, 
+      ${baseColor} 60%,
+      ${baseColor}cc 100%
+    )`;
 
     return {
+      position: 'absolute' as const,
       left: `${left}%`,
       width: `${width}%`,
       height: '32px',
       top: '50%',
       transform: 'translateY(-50%)',
-      zIndex: 10,
-      position: 'absolute' as const,
-      clipPath: `polygon(${polygonPoints})`
+      background: gradient,
+      borderRadius: '4px',
+      boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+      overflow: 'hidden',
+      whiteSpace: 'nowrap' as const,
+      textOverflow: 'ellipsis',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '0 8px',
+      color: 'white',
+      fontSize: '12px',
+      fontWeight: 500,
+      transition: 'all 0.2s ease',
+      cursor: 'pointer',
+      zIndex: 1
     };
   };
 
@@ -366,97 +424,16 @@ export function Calendar({
   };
 
   const BookingCell = ({ booking }: { booking: APIBooking }) => {
-    console.log('Rendering booking cell:', {
-      bookingId: booking.id,
-      roomNumber: booking.room_number,
-      checkIn: booking.check_in_date,
-      checkOut: booking.check_out_date
-    });
-
-    const bookingStart = new Date(booking.check_in_date);
-    const bookingEnd = new Date(booking.check_out_date);
-    bookingStart.setHours(0, 0, 0, 0);
-    bookingEnd.setHours(0, 0, 0, 0);
-    
-    // Create separate elements for check-in, middle days, and check-out
-    const elements = dates.map((date, index) => {
-      const currentDate = new Date(date);
-      currentDate.setHours(0, 0, 0, 0);
-      
-      const isCheckIn = currentDate.getTime() === bookingStart.getTime();
-      const isCheckOut = currentDate.getTime() === bookingEnd.getTime();
-      const isMiddleDay = currentDate > bookingStart && currentDate < bookingEnd;
-
-      if (!isCheckIn && !isCheckOut && !isMiddleDay) return null;
-
-      const cellWidth = 100 / dates.length;
-      const style = {
-        position: 'absolute' as const,
-        height: '32px',
-        top: '50%',
-        transform: 'translateY(-50%)',
-        zIndex: 10,
-        width: `${cellWidth}%`,
-        left: `${index * cellWidth}%`,
-      };
-
-      if (isCheckIn) {
-        return (
-          <div
-            key={`checkin-${date}`}
-            className={`${getStatusColor(booking)}`}
-            style={{
-              ...style,
-              clipPath: 'polygon(50% 0, 100% 0, 100% 100%, 50% 100%)'
-            }}
-          />
-        );
-      }
-
-      if (isMiddleDay) {
-        return (
-          <div
-            key={`middle-${date}`}
-            className={`${getStatusColor(booking)}`}
-            style={{
-              ...style,
-              clipPath: 'polygon(0 0, 100% 0, 100% 100%, 0 100%)'
-            }}
-          />
-        );
-      }
-
-      if (isCheckOut) {
-        return (
-          <div
-            key={`checkout-${date}`}
-            className={`${getStatusColor(booking)}`}
-            style={{
-              ...style,
-              clipPath: 'polygon(0 0, 50% 0, 50% 100%, 0 100%)'
-            }}
-          />
-        );
-      }
-    });
-
     return (
       <div
+        style={getBookingStyle(booking)}
         onClick={() => setSelectedBooking(booking)}
-        className="absolute inset-0 cursor-pointer group hover:brightness-110"
+        className="hover:brightness-110"
+        title={`${booking.first_name} ${booking.last_name} (${booking.booking_number})`}
       >
-        {elements}
-        <div className="absolute inset-0 flex items-center px-2 py-1 overflow-hidden pointer-events-none">
-          <div className="flex-1 overflow-hidden">
-            <div className="text-white font-medium text-sm truncate flex items-center gap-1">
-              {booking.status === 'maintenance' ? 'MAINTENANCE BLOCK' : (
-                <>
-                  <span className="bg-white/20 text-xs px-1 rounded">B</span>
-                  {booking.first_name} {booking.last_name}
-                </>
-              )}
-            </div>
-          </div>
+        <div className="flex items-center gap-1.5 min-w-0 justify-center">
+          {getBookingSourceIcon(booking.source)}
+          <span className="truncate">{booking.first_name} {booking.last_name}</span>
         </div>
       </div>
     );
@@ -642,7 +619,7 @@ export function Calendar({
   }, [getBookingRoom]);
 
   return (
-    <div className="bg-white rounded-lg shadow">
+    <div className="bg-white rounded-lg shadow flex flex-col">
       <div className="flex items-center justify-between p-6 border-b">
         <h2 className="text-2xl font-semibold flex items-center gap-2">
           <CalendarIcon className="w-6 h-6 text-[#2596be]" />
@@ -742,76 +719,77 @@ export function Calendar({
         </div>
       </div>
 
-      <div className="overflow-x-auto">
-        <div className="min-w-[800px]">
-          {/* Header with dates */}
-          <div className="grid" style={{ gridTemplateColumns: `200px repeat(${parseInt(viewType)}, minmax(120px, 1fr))` }}>
-            <div className="p-2 font-medium bg-gray-100">Room</div>
+      <div className="flex flex-col" style={{ height: 'calc(100vh - 200px)' }}>
+        {/* Header with dates - make it sticky */}
+        <div className="sticky top-0 z-10 bg-white border-b shadow-sm">
+          <div className="grid" style={{ gridTemplateColumns: `150px repeat(${parseInt(viewType)}, minmax(60px, 1fr))` }}>
+            <div className="p-1 font-medium bg-gray-100 text-sm">Room</div>
             {dates.map((date) => (
-              <div key={date.toString()} className="p-2 font-medium bg-gray-100 text-center">
-                {format(date, 'MMM d')}
+              <div key={date.toString()} className="px-1 py-2 font-medium bg-gray-100 text-center text-xs">
+                <div>{format(date, 'MMM')}</div>
+                <div className="font-bold">{format(date, 'd')}</div>
               </div>
             ))}
           </div>
+        </div>
 
-          {/* Room types and their rooms */}
-          {displayRoomTypes.map((type) => {
-            const typeRooms = roomsByType[type.id] || [];
-            return (
-              <React.Fragment key={type.id}>
-                {/* Room type header */}
-                <div 
-                  className="grid cursor-pointer hover:bg-gray-100/50 transition-colors" 
-                  style={{ gridTemplateColumns: `200px repeat(${parseInt(viewType)}, minmax(120px, 1fr))` }}
-                  onClick={() => toggleRoomType(type.id)}
-                >
-                  <div className="p-2 font-medium bg-gray-50 flex items-center justify-between">
-                    <div>{type.name} ({typeRooms.length})</div>
-                    <div className={`transform transition-transform ${collapsedTypes[type.id] ? 'rotate-180' : ''}`}>
-                      ▼
-                    </div>
-                  </div>
-                  {dates.map((date) => (
-                    <div key={date.toString()} className="p-2 bg-gray-50 relative">
-                      {getRoomBookings(type.id.toString(), date).length > 0 && (
-                        <div className="absolute inset-1 bg-[#2596be]/10 rounded flex items-center justify-center">
-                          <span className="text-sm font-medium text-[#2596be]">
-                            {getRoomBookings(type.id.toString(), date).length} booking{getRoomBookings(type.id.toString(), date).length > 1 ? 's' : ''}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-
-                {/* Rooms */}
-                {!collapsedTypes[type.id] && typeRooms
-                  .sort((a, b) => a.room_number.localeCompare(b.room_number))
-                  .map((room) => (
-                    <div
-                      key={room.id}
-                      className="grid hover:bg-gray-50"
-                      style={{ gridTemplateColumns: `200px repeat(${parseInt(viewType)}, minmax(120px, 1fr))` }}
-                    >
-                      <div className="p-2">
-                        <div className="font-medium">{room.room_number}</div>
-                        <div className="text-sm text-gray-500">Floor {room.floor}</div>
+        {/* Scrollable content */}
+        <div className="overflow-auto flex-1">
+          <div className="w-full">
+            {/* Room types and their rooms */}
+            {displayRoomTypes.map((type) => {
+              const typeRooms = roomsByType[type.id] || [];
+              return (
+                <React.Fragment key={type.id}>
+                  {/* Room type header */}
+                  <div 
+                    className="grid cursor-pointer hover:bg-gray-100/50 transition-colors" 
+                    style={{ gridTemplateColumns: `150px repeat(${parseInt(viewType)}, minmax(60px, 1fr))` }}
+                    onClick={() => toggleRoomType(type.id)}
+                  >
+                    <div className="p-1 font-medium bg-gray-50 flex items-center justify-between">
+                      <div className="truncate text-sm">{type.name} ({typeRooms.length})</div>
+                      <div className={`transform transition-transform ${collapsedTypes[type.id] ? 'rotate-180' : ''}`}>
+                        ▼
                       </div>
-                      {dates.map((date) => {
-                        const roomBookings = getRoomBookings(room.room_number, date);
-                        return (
-                          <div key={date.toString()} className="p-2 relative">
-                            {roomBookings.map(booking => (
-                              <BookingCell key={booking.id} booking={booking} />
-                            ))}
-                          </div>
-                        );
-                      })}
                     </div>
-                  ))}
-              </React.Fragment>
-            );
-          })}
+                    {dates.map((date) => (
+                      <div key={date.toString()} className="p-1 bg-gray-50 relative">
+                        {getRoomBookings(type.id.toString()).length > 0 && (
+                          <div className="absolute inset-1 bg-[#2596be]/10 rounded flex items-center justify-center">
+                            <span className="text-xs font-medium text-[#2596be]">
+                              {getRoomBookings(type.id.toString()).length}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Rooms */}
+                  {!collapsedTypes[type.id] && typeRooms
+                    .sort((a, b) => a.room_number.localeCompare(b.room_number))
+                    .map((room) => (
+                      <div
+                        key={room.id}
+                        className="grid hover:bg-gray-50"
+                        style={{ gridTemplateColumns: `150px repeat(${parseInt(viewType)}, minmax(60px, 1fr))` }}
+                      >
+                        <div className="p-1">
+                          <div className="font-medium truncate text-sm">{room.room_number}</div>
+                          <div className="text-xs text-gray-500">Floor {room.floor}</div>
+                        </div>
+                        <div className="relative" style={{ gridColumn: `2 / span ${dates.length}` }}>
+                          {getRoomBookings(room.room_number).map(booking => (
+                            <BookingCell key={booking.id} booking={booking} />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                </React.Fragment>
+              );
+            })}
+          </div>
         </div>
       </div>
 

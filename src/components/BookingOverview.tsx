@@ -51,13 +51,37 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
         search: searchTerm,
         sort_by: sortField,
         sort_order: sortDirection,
-        hotel_id: API_CONFIG.HOTEL_ID
+        hotel_id: API_CONFIG.HOTEL_ID,
+        include: 'room,guest'
       });
+
+      // Debug room assignments
+      if (response.data?.[0]) {
+        console.log('Sample booking room data:', {
+          booking: response.data[0].booking_number,
+          room_number: response.data[0].room_number,
+          room_object: response.data[0].room,
+          room_details: response.data[0].room_details,
+          status: response.data[0].status
+        });
+      }
+
+      // Filter out cancelled bookings for assignment stats
+      const activeBookings = response.data?.filter((b: APIBooking) => b.status !== 'cancelled') || [];
 
       console.log('Bookings response:', {
         data: response.data?.length,
+        activeBookings: activeBookings.length,
         pagination: response.pagination,
-        raw: response
+        sampleBooking: response.data?.[0],
+        assignmentStatus: activeBookings.map((b: APIBooking) => ({
+          id: b.id,
+          booking: b.booking_number,
+          room: b.room_number,
+          room_object: b.room,
+          room_details: b.room_details,
+          assigned: !!(b.room_number || b.room?.room_number)
+        }))
       });
       
       if (response && response.data) {
@@ -65,7 +89,10 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
         setTotalPages(response.pagination.total_pages || 1);
         console.log('Updated bookings state:', {
           bookings: response.data.length,
-          totalPages: response.pagination.total_pages
+          activeBookings: activeBookings.length,
+          totalPages: response.pagination.total_pages,
+          assignedCount: activeBookings.filter((b: APIBooking) => b.room_number || b.room?.room_number).length,
+          unassignedCount: activeBookings.filter((b: APIBooking) => !(b.room_number || b.room?.room_number)).length
         });
       } else {
         console.error('Invalid response format:', response);
@@ -296,6 +323,45 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
     return `${start}-${end} of ${totalStats.totalBookings}`;
   };
 
+  const getAssignmentStatus = (booking: APIBooking) => {
+    // Don't show room assignments for cancelled bookings
+    if (booking.status === 'cancelled') {
+      return {
+        text: 'Cancelled',
+        color: 'bg-gray-100 text-gray-800'
+      };
+    }
+
+    // Check if room is assigned through any of the possible fields
+    const hasRoom = booking.room_id || 
+                   booking.room_number || 
+                   (booking.room && booking.room.room_number) ||
+                   (booking.room_details && booking.room_details.room_number) ||
+                   (booking.raw_data?.bookingDetail?.BookingTran?.[0]?.RoomName);
+    
+    const roomNumber = booking.room_number || 
+                      (booking.room && booking.room.room_number) ||
+                      (booking.room_details && booking.room_details.room_number) ||
+                      (booking.raw_data?.bookingDetail?.BookingTran?.[0]?.RoomName);
+    
+    if (hasRoom && roomNumber) {
+      return {
+        text: `Room ${roomNumber}`,
+        color: 'bg-green-100 text-green-800'
+      };
+    }
+    if (booking.assignment_error) {
+      return {
+        text: `Assignment Failed: ${booking.assignment_error}`,
+        color: 'bg-red-100 text-red-800'
+      };
+    }
+    return {
+      text: 'Unassigned',
+      color: 'bg-yellow-100 text-yellow-800'
+    };
+  };
+
   return (
     <div className="bg-white rounded-lg shadow">
       <div className="p-6 border-b">
@@ -395,8 +461,11 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
                     <span className="w-16">Check Out</span>
                   </SortHeader>
                   <SortHeader field="room_type_name">
-                    <span className="w-20">Room</span>
+                    <span className="w-20">Room Type</span>
                   </SortHeader>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                    <span className="w-16">Assignment</span>
+                  </th>
                   <SortHeader field="status">
                     <span className="w-16">Status</span>
                   </SortHeader>
@@ -406,40 +475,48 @@ export function BookingOverview({ bookings: initialBookings }: BookingOverviewPr
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {bookings.map(booking => (
-                  <tr 
-                    key={booking.id} 
-                    className="hover:bg-gray-50 cursor-pointer" 
-                    onClick={() => {
-                      setSelectedBooking(booking);
-                      setIsModalOpen(true);
-                    }}
-                  >
-                    <td className="px-2 py-2 whitespace-nowrap text-sm font-medium text-gray-900 truncate">
-                      {booking.booking_number}
-                    </td>
-                    <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500 truncate">
-                      {booking.first_name} {booking.last_name}
-                    </td>
-                    <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500">
-                      {formatDate(booking.check_in_date)}
-                    </td>
-                    <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500">
-                      {formatDate(booking.check_out_date)}
-                    </td>
-                    <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500 truncate">
-                      {booking.room_type_name}
-                    </td>
-                    <td className="px-2 py-2 whitespace-nowrap">
-                      <span className={`px-1.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusBadgeColor(booking.status)}`}>
-                        {booking.status}
-                      </span>
-                    </td>
-                    <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500">
-                      ${parseFloat(booking.total_amount).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
+                {bookings.map(booking => {
+                  const assignmentStatus = getAssignmentStatus(booking);
+                  return (
+                    <tr 
+                      key={booking.id} 
+                      className="hover:bg-gray-50 cursor-pointer" 
+                      onClick={() => {
+                        setSelectedBooking(booking);
+                        setIsModalOpen(true);
+                      }}
+                    >
+                      <td className="px-2 py-2 whitespace-nowrap text-sm font-medium text-gray-900 truncate">
+                        {booking.booking_number}
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500 truncate">
+                        {booking.first_name} {booking.last_name}
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500">
+                        {formatDate(booking.check_in_date)}
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500">
+                        {formatDate(booking.check_out_date)}
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500 truncate">
+                        {booking.room_type_name}
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        <span className={`px-1.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full ${assignmentStatus.color}`}>
+                          {assignmentStatus.text}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        <span className={`px-1.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusBadgeColor(booking.status)}`}>
+                          {booking.status}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap text-sm text-gray-500">
+                        ${parseFloat(booking.total_amount).toLocaleString()}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             <div className="flex justify-between items-center p-4 border-t">

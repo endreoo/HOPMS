@@ -61,6 +61,21 @@ export interface APIBooking {
   phone?: string;
   room_type_name?: string;
   rate_plan_name?: string;
+  guest_name?: string;
+  assignment_error?: string;
+  assigned?: boolean;
+  raw_data?: {
+    booking?: {
+      BookingTran?: {
+        RoomName?: string;
+      };
+    };
+    bookingDetail?: {
+      BookingTran?: Array<{
+        RoomName?: string;
+      }>;
+    };
+  };
 }
 
 export interface APIResponse<T> {

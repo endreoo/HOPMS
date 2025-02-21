@@ -238,6 +238,8 @@ export const getBookings = async (params: {
   sort_by?: string;
   sort_order?: 'asc' | 'desc';
   search?: string;
+  assigned?: boolean;
+  include?: string;
 }) => {
   const requestParams = {
     ...params,
